@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kids Drawing Pad</title>
+  <style>
+    :root{
+      --bg:#f6f7fb;
+      --panel:#ffffff;
+      --ink:#1f2937;
+      --accent:#7c3aed;
+      --accent-2:#10b981;
+      --muted:#cbd5e1;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans";
+      background: radial-gradient(1200px 600px at 20% -10%, #f0f2ff, transparent),
+                  radial-gradient(900px 500px at 120% 10%, #e6fff4, transparent), var(--bg);
+      color:var(--ink);
+    }
+    .wrap{ max-width:1100px; margin:20px auto; padding:16px; }
+    .app{
+      background:var(--panel); border-radius:24px; box-shadow:0 20px 40px rgba(17,24,39,.1);
+      overflow:hidden; border:1px solid #eef2ff;
+    }
+    .toolbar{ display:flex; flex-wrap:wrap; gap:12px; align-items:center; 
+      padding:14px 16px; background:linear-gradient(180deg,#fff, #fafaff);
+      border-bottom:1px solid #eef2ff;
+    }
+    .toolbar .group{ display:flex; align-items:center; gap:8px; padding-right:10px; border-right:1px dashed #e5e7eb; }
+    .toolbar .group:last-child{ border-right:none; }
+
+    button, .chip{
+      appearance:none; border:none; background:#fff; border-radius:16px; padding:10px 12px; 
+      box-shadow:0 3px 0 #e5e7eb inset, 0 1px 0 rgba(0,0,0,.02);
+      cursor:pointer; font-weight:600; transition: transform .04s ease, box-shadow .2s ease;
+    }
+    button:hover{ transform: translateY(-1px); }
+    button:active{ transform: translateY(0); box-shadow:0 0 0 #e5e7eb inset; }
+    .btn-primary{ background:linear-gradient(180deg, #8b5cf6, #7c3aed); color:#fff; box-shadow:none; }
+    .btn-ghost{ background:#f8fafc; }
+
+    .color-swatch{ width:28px; height:28px; border-radius:50%; border:2px solid #fff; box-shadow:0 0 0 2px rgba(0,0,0,.06); display:inline-block; cursor:pointer; }
+    .swatches{ display:flex; gap:8px; align-items:center; }
+
+    label{ font-size:12px; color:#6b7280; display:block; }
+    .range{ display:flex; align-items:center; gap:8px; }
+
+    #board-wrap{ position:relative; background:repeating-conic-gradient(from 45deg, #fafafa 0% 25%, #fff 0% 50%) 0 / 20px 20px; }
+    #board{ display:block; width:100%; height:70vh; touch-action:none; background:transparent; }
+
+    .footer{ display:flex; justify-content:space-between; align-items:center; padding:10px 16px; border-top:1px solid #eef2ff; background:#fff;
+      font-size:12px; color:#6b7280;
+    }
+    .spacer{ flex:1 }
+    select.stickers{ padding:8px 10px; border-radius:12px; border:1px solid #e5e7eb; background:#fff; font-size:16px; }
+    @media (max-width:640px){
+      #board{ height:64vh; }
+      .toolbar{ gap:10px; }
+      .toolbar .group{ border-right:none; padding-right:0 }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1 style="margin:8px 8px 16px; font-size:28px">🎨 Kids Drawing Pad <span style="font-size:14px;color:#6b7280">(HTML • CSS • JS)</span></h1>
+    <div class="app">
+      <div class="toolbar" role="toolbar">
+        <div class="group">
+          <div class="swatches" id="presetColors"></div>
+          <input id="colorPicker" type="color" value="#1f2937" />
+        </div>
+        <div class="group">
+          <div class="range">
+            <label for="brush">Brush</label>
+            <input id="brush" type="range" min="2" max="60" value="12" />
+            <span id="brushVal" class="chip">12px</span>
+          </div>
+        </div>
+        <div class="group">
+          <button id="drawBtn" class="btn-ghost" aria-pressed="true">✏️ Draw</button>
+          <button id="eraseBtn" class="btn-ghost" aria-pressed="false">🩹 Erase</button>
+          <select id="stickerSelect" class="stickers">
+            <option value="">✨ Stickers</option>
+            <option>⭐</option><option>❤️</option><option>🌈</option>
+            <option>🐱</option><option>🦄</option><option>🌟</option><option>🎈</option>
+          </select>
+        </div>
+        <div class="group">
+          <button id="undoBtn">↶ Undo</button>
+          <button id="redoBtn">↷ Redo</button>
+          <button id="clearBtn">🧹 Clear</button>
+          <button id="saveBtn" class="btn-primary">⬇️ Save</button>
+        </div>
+      </div>
+
+      <div id="board-wrap">
+        <canvas id="board"></canvas>
+      </div>
+
+      <div class="footer">
+        <div>Tip: D=Draw, E=Erase, S=Sticker, C=Clear, Ctrl+S=Save</div>
+        <div class="spacer"></div>
+        <div id="status">Ready</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <script>
+  const socket = io("http://192.168.178.127:4000");
+
+  const $ = (sel) => document.querySelector(sel);
+  const board = $('#board');
+  const ctx = board.getContext('2d');
+  const statusEl = $('#status');
+
+  const colorPicker = $('#colorPicker');
+  const brush = $('#brush');
+  const brushVal = $('#brushVal');
+  const drawBtn = $('#drawBtn');
+  const eraseBtn = $('#eraseBtn');
+  const stickerSelect = $('#stickerSelect');
+  const undoBtn = $('#undoBtn');
+  const redoBtn = $('#redoBtn');
+  const clearBtn = $('#clearBtn');
+  const saveBtn = $('#saveBtn');
+  const presetColors = $('#presetColors');
+
+  const PRESETS = ['#1f2937','#ef4444','#f59e0b','#10b981','#3b82f6','#8b5cf6','#ec4899','#22d3ee','#f43f5e'];
+
+  let mode = 'draw'; 
+  let drawing = false;
+  let sticker = '';
+  let history = [];
+  let redoStack = [];
+
+  function setStatus(msg){ statusEl.textContent = msg; }
+
+  function setupSwatches(){
+    PRESETS.forEach(c => {
+      const b = document.createElement('button');
+      b.className = 'color-swatch';
+      b.style.background = c;
+      b.addEventListener('click', () => { colorPicker.value = c; });
+      presetColors.appendChild(b);
+    });
+  }
+
+  function resizeCanvas(){
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const rect = board.getBoundingClientRect();
+    board.width = Math.floor(rect.width * dpr);
+    board.height = Math.floor(rect.height * dpr);
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.scale(dpr, dpr);
+  }
+
+  function saveHistory(){
+    history.push(board.toDataURL('image/png'));
+    if(history.length>100) history.shift();
+    redoStack.length = 0;
+    updateUndoRedo();
+  }
+
+  function updateUndoRedo(){
+    undoBtn.disabled = history.length===0;
+    redoBtn.disabled = redoStack.length===0;
+  }
+
+  function setMode(m){
+    mode = m;
+    drawBtn.setAttribute('aria-pressed', m==='draw');
+    eraseBtn.setAttribute('aria-pressed', m==='erase');
+    setStatus(m==='draw'?'Draw mode': m==='erase'?'Eraser mode':'Sticker mode');
+  }
+
+  // ---------------- Local Drawing -----------------
+  function startStroke(x,y){
+    socket.emit("paintPos", { id: socket.id, x, y, color: colorPicker.value, brush: brush.value, mode });
+    drawing = true;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.lineWidth = parseInt(brush.value, 10);
+    ctx.strokeStyle = colorPicker.value;
+    ctx.globalCompositeOperation = (mode === 'erase') ? 'destination-out' : 'source-over';
+    ctx.beginPath(); ctx.moveTo(x, y);
+  }
+  function moveStroke(x,y){
+    socket.emit("moveStroke", { id: socket.id, x, y });
+    if (!drawing) return;
+    ctx.lineTo(x, y); ctx.stroke();
+  }
+  function endStroke(){
+    if(!drawing) return;
+    drawing = false; ctx.closePath(); saveHistory();
+    socket.emit("endStroke", { id: socket.id });
+  }
+
+  function addStickerAt(x,y){
+    ctx.save();
+    const size = parseInt(brush.value,10) * 3;
+    ctx.font = `bold ${size}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillText(sticker, x, y);
+    ctx.restore();
+    saveHistory();
+  }
+
+  function getPos(evt){
+    const rect = board.getBoundingClientRect();
+    const clientX = evt.touches? evt.touches[0].clientX : evt.clientX;
+    const clientY = evt.touches? evt.touches[0].clientY : evt.clientY;
+    return { x: clientX - rect.left, y: clientY - rect.top };
+  }
+
+  // Pointer events
+  board.addEventListener('mousedown', e=>{ const {x,y}=getPos(e); if(mode==='sticker' && sticker){ addStickerAt(x,y); return;} startStroke(x,y); });
+  board.addEventListener('mousemove', e=>{ const {x,y}=getPos(e); moveStroke(x,y); });
+  window.addEventListener('mouseup', endStroke);
+
+  board.addEventListener('touchstart', e=>{ e.preventDefault(); const {x,y}=getPos(e); if(mode==='sticker' && sticker){ addStickerAt(x,y); return;} startStroke(x,y); });
+  board.addEventListener('touchmove', e=>{ e.preventDefault(); const {x,y}=getPos(e); moveStroke(x,y); });
+  board.addEventListener('touchend', e=>{ e.preventDefault(); endStroke(); });
+
+  // Controls
+  brush.addEventListener('input', ()=>{ brushVal.textContent = brush.value+ 'px'; });
+  drawBtn.addEventListener('click', ()=> setMode('draw'));
+  eraseBtn.addEventListener('click', ()=> setMode('erase'));
+  stickerSelect.addEventListener('change', ()=>{ sticker = stickerSelect.value; setMode('sticker'); });
+
+  undoBtn.addEventListener('click', ()=>{ if(history.length===0) return; const lastState = history.pop(); redoStack.push(board.toDataURL('image/png')); restoreFrom(lastState); updateUndoRedo(); });
+  redoBtn.addEventListener('click', ()=>{ if(redoStack.length===0) return; const next = redoStack.pop(); history.push(board.toDataURL('image/png')); restoreFrom(next); updateUndoRedo(); });
+
+  function restoreFrom(dataUrl){
+    const img = new Image();
+    img.onload = ()=>{ ctx.clearRect(0,0,board.width,board.height); ctx.drawImage(img, 0, 0, board.width, board.height); };
+    img.src = dataUrl;
+  }
+
+  clearBtn.addEventListener('click', ()=>{ ctx.clearRect(0,0,board.width,board.height); saveHistory(); });
+  saveBtn.addEventListener('click', ()=>{ const link = document.createElement('a'); link.download = 'my-drawing.png'; link.href = board.toDataURL('image/png'); link.click(); });
+
+  // ---------------- Remote Drawing -----------------
+  const remoteDrawings = {};
+
+  socket.on("paintPos", (data) => {
+    const { id, x, y, color, brush, mode } = data;
+    if (!remoteDrawings[id]) remoteDrawings[id] = {};
+    const r = remoteDrawings[id];
+    r.color = color; r.brush = parseInt(brush,10); r.mode = mode; r.active = true;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.lineWidth = r.brush; ctx.strokeStyle = r.color;
+    ctx.globalCompositeOperation = (r.mode === 'erase') ? 'destination-out' : 'source-over';
+    ctx.beginPath(); ctx.moveTo(x,y);
+  });
+
+  socket.on("moveStroke", (data) => {
+    const { id, x, y } = data;
+    const r = remoteDrawings[id];
+    if (!r || !r.active) return;
+    ctx.lineTo(x,y); ctx.stroke();
+  });
+
+  socket.on("endStroke", (data) => {
+    const { id } = data;
+    const r = remoteDrawings[id];
+    if(r && r.active){ ctx.closePath(); r.active=false; }
+  });
+
+  // Init
+  function init(){
+    setupSwatches();
+    brush.dispatchEvent(new Event('input'));
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+    saveHistory();
+  }
+  init();
+  </script>
+</body>
+</html>
