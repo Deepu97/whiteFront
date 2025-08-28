@@ -41,6 +41,7 @@
     button:active{ transform: translateY(0); box-shadow:0 0 0 #e5e7eb inset; }
     .btn-primary{ background:linear-gradient(180deg, #8b5cf6, #7c3aed); color:#fff; box-shadow:none; }
     .btn-ghost{ background:#f8fafc; }
+    button[disabled] { opacity: 0.5; cursor: not-allowed; }
 
     .color-swatch{ width:28px; height:28px; border-radius:50%; border:2px solid #fff; box-shadow:0 0 0 2px rgba(0,0,0,.06); display:inline-block; cursor:pointer; }
     .swatches{ display:flex; gap:8px; align-items:center; }
@@ -56,6 +57,53 @@
     }
     .spacer{ flex:1 }
     select.stickers{ padding:8px 10px; border-radius:12px; border:1px solid #e5e7eb; background:#fff; font-size:16px; }
+    
+    .connection-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: 10px;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .status-connected { background-color: #10b981; }
+    .status-disconnected { background-color: #ef4444; }
+    
+    .modal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0,0,0,0.5);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 1000;
+    }
+    .modal-content {
+      background: white;
+      padding: 24px;
+      border-radius: 16px;
+      max-width: 400px;
+      width: 90%;
+      text-align: center;
+    }
+    .modal h2 {
+      margin-top: 0;
+    }
+    .modal input {
+      width: 100%;
+      padding: 10px;
+      margin: 10px 0;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+    }
+    
     @media (max-width:640px){
       #board{ height:64vh; }
       .toolbar{ gap:10px; }
@@ -104,18 +152,40 @@
         <div>Tip: D=Draw, E=Erase, S=Sticker, C=Clear, Ctrl+S=Save</div>
         <div class="spacer"></div>
         <div id="status">Ready</div>
+        <div class="connection-status" id="connectionStatus">
+          <span class="status-dot status-disconnected" id="statusDot"></span>
+          <span id="connectionText">Offline</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="serverModal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <h2>Connect to Server</h2>
+      <p>Enter the server URL to enable collaborative drawing:</p>
+      <input type="text" id="serverUrl" placeholder="ws://localhost:4000" value="http://localhost:4000" />
+      <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: center;">
+        <button id="connectBtn" class="btn-primary">Connect</button>
+        <button id="workOfflineBtn">Work Offline</button>
       </div>
     </div>
   </div>
 
   <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
   <script>
-  const socket = io("http://192.168.178.127:4000");
-
+  let socket = null;
   const $ = (sel) => document.querySelector(sel);
   const board = $('#board');
   const ctx = board.getContext('2d');
   const statusEl = $('#status');
+  const connectionStatus = $('#connectionStatus');
+  const statusDot = $('#statusDot');
+  const connectionText = $('#connectionText');
+  const serverModal = $('#serverModal');
+  const serverUrlInput = $('#serverUrl');
+  const connectBtn = $('#connectBtn');
+  const workOfflineBtn = $('#workOfflineBtn');
 
   const colorPicker = $('#colorPicker');
   const brush = $('#brush');
@@ -136,6 +206,19 @@
   let sticker = '';
   let history = [];
   let redoStack = [];
+  let isConnected = false;
+
+  function updateConnectionStatus(connected) {
+    isConnected = connected;
+    if (connected) {
+      statusDot.className = 'status-dot status-connected';
+      connectionText.textContent = 'Connected';
+      serverModal.style.display = 'none';
+    } else {
+      statusDot.className = 'status-dot status-disconnected';
+      connectionText.textContent = 'Offline';
+    }
+  }
 
   function setStatus(msg){ statusEl.textContent = msg; }
 
@@ -156,18 +239,27 @@
     board.height = Math.floor(rect.height * dpr);
     ctx.setTransform(1,0,0,1,0,0);
     ctx.scale(dpr, dpr);
+    
+    // Redraw the last state after resize
+    if (history.length > 0) {
+      const img = new Image();
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0, board.width, board.height);
+      };
+      img.src = history[history.length - 1];
+    }
   }
 
   function saveHistory(){
     history.push(board.toDataURL('image/png'));
-    if(history.length>100) history.shift();
+    if(history.length > 50) history.shift(); // Reduced from 100 to 50 for better performance
     redoStack.length = 0;
     updateUndoRedo();
   }
 
   function updateUndoRedo(){
-    undoBtn.disabled = history.length===0;
-    redoBtn.disabled = redoStack.length===0;
+    undoBtn.disabled = history.length <= 1; // Disable if only current state exists
+    redoBtn.disabled = redoStack.length === 0;
   }
 
   function setMode(m){
@@ -179,7 +271,9 @@
 
   // ---------------- Local Drawing -----------------
   function startStroke(x,y){
-    socket.emit("paintPos", { id: socket.id, x, y, color: colorPicker.value, brush: brush.value, mode });
+    if (isConnected && socket) {
+      socket.emit("paintPos", { id: socket.id, x, y, color: colorPicker.value, brush: brush.value, mode });
+    }
     drawing = true;
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     ctx.lineWidth = parseInt(brush.value, 10);
@@ -187,15 +281,21 @@
     ctx.globalCompositeOperation = (mode === 'erase') ? 'destination-out' : 'source-over';
     ctx.beginPath(); ctx.moveTo(x, y);
   }
+  
   function moveStroke(x,y){
-    socket.emit("moveStroke", { id: socket.id, x, y });
+    if (isConnected && socket) {
+      socket.emit("moveStroke", { id: socket.id, x, y });
+    }
     if (!drawing) return;
     ctx.lineTo(x, y); ctx.stroke();
   }
+  
   function endStroke(){
     if(!drawing) return;
     drawing = false; ctx.closePath(); saveHistory();
-    socket.emit("endStroke", { id: socket.id });
+    if (isConnected && socket) {
+      socket.emit("endStroke", { id: socket.id });
+    }
   }
 
   function addStickerAt(x,y){
@@ -208,6 +308,10 @@
     ctx.fillText(sticker, x, y);
     ctx.restore();
     saveHistory();
+    
+    if (isConnected && socket) {
+      socket.emit("addSticker", { id: socket.id, x, y, sticker, size });
+    }
   }
 
   function getPos(evt){
@@ -218,13 +322,78 @@
   }
 
   // Pointer events
-  board.addEventListener('mousedown', e=>{ const {x,y}=getPos(e); if(mode==='sticker' && sticker){ addStickerAt(x,y); return;} startStroke(x,y); });
-  board.addEventListener('mousemove', e=>{ const {x,y}=getPos(e); moveStroke(x,y); });
+  board.addEventListener('mousedown', e=>{ 
+    const {x,y}=getPos(e); 
+    if(mode==='sticker' && sticker){ 
+      addStickerAt(x,y); 
+      return;
+    } 
+    startStroke(x,y); 
+  });
+  
+  board.addEventListener('mousemove', e=>{ 
+    const {x,y}=getPos(e); 
+    moveStroke(x,y); 
+  });
+  
   window.addEventListener('mouseup', endStroke);
 
-  board.addEventListener('touchstart', e=>{ e.preventDefault(); const {x,y}=getPos(e); if(mode==='sticker' && sticker){ addStickerAt(x,y); return;} startStroke(x,y); });
-  board.addEventListener('touchmove', e=>{ e.preventDefault(); const {x,y}=getPos(e); moveStroke(x,y); });
-  board.addEventListener('touchend', e=>{ e.preventDefault(); endStroke(); });
+  board.addEventListener('touchstart', e=>{ 
+    e.preventDefault(); 
+    const {x,y}=getPos(e); 
+    if(mode==='sticker' && sticker){ 
+      addStickerAt(x,y); 
+      return;
+    } 
+    startStroke(x,y); 
+  });
+  
+  board.addEventListener('touchmove', e=>{ 
+    e.preventDefault(); 
+    const {x,y}=getPos(e); 
+    moveStroke(x,y); 
+  });
+  
+  board.addEventListener('touchend', e=>{ 
+    e.preventDefault(); 
+    endStroke(); 
+  });
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'd' || e.key === 'D') {
+      setMode('draw');
+      e.preventDefault();
+    } else if (e.key === 'e' || e.key === 'E') {
+      setMode('erase');
+      e.preventDefault();
+    } else if (e.key === 's' || e.key === 'S') {
+      if (stickerSelect.value) {
+        setMode('sticker');
+      }
+      e.preventDefault();
+    } else if (e.key === 'c' || e.key === 'C') {
+      if (e.ctrlKey || e.metaKey) {
+        // Allow Ctrl+C for copy
+        return;
+      }
+      clearBtn.click();
+      e.preventDefault();
+    } else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+      if (e.shiftKey) {
+        redoBtn.click();
+      } else {
+        undoBtn.click();
+      }
+      e.preventDefault();
+    } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) {
+      redoBtn.click();
+      e.preventDefault();
+    } else if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+      saveBtn.click();
+      e.preventDefault();
+    }
+  });
 
   // Controls
   brush.addEventListener('input', ()=>{ brushVal.textContent = brush.value+ 'px'; });
@@ -232,8 +401,21 @@
   eraseBtn.addEventListener('click', ()=> setMode('erase'));
   stickerSelect.addEventListener('change', ()=>{ sticker = stickerSelect.value; setMode('sticker'); });
 
-  undoBtn.addEventListener('click', ()=>{ if(history.length===0) return; const lastState = history.pop(); redoStack.push(board.toDataURL('image/png')); restoreFrom(lastState); updateUndoRedo(); });
-  redoBtn.addEventListener('click', ()=>{ if(redoStack.length===0) return; const next = redoStack.pop(); history.push(board.toDataURL('image/png')); restoreFrom(next); updateUndoRedo(); });
+  undoBtn.addEventListener('click', ()=>{ 
+    if(history.length <= 1) return; 
+    const lastState = history.pop(); 
+    redoStack.push(board.toDataURL('image/png')); 
+    restoreFrom(history[history.length - 1]); 
+    updateUndoRedo(); 
+  });
+  
+  redoBtn.addEventListener('click', ()=>{ 
+    if(redoStack.length===0) return; 
+    const next = redoStack.pop(); 
+    history.push(board.toDataURL('image/png')); 
+    restoreFrom(next); 
+    updateUndoRedo(); 
+  });
 
   function restoreFrom(dataUrl){
     const img = new Image();
@@ -241,46 +423,126 @@
     img.src = dataUrl;
   }
 
-  clearBtn.addEventListener('click', ()=>{ ctx.clearRect(0,0,board.width,board.height); saveHistory(); });
-  saveBtn.addEventListener('click', ()=>{ const link = document.createElement('a'); link.download = 'my-drawing.png'; link.href = board.toDataURL('image/png'); link.click(); });
+  clearBtn.addEventListener('click', ()=>{ 
+    if (confirm("Are you sure you want to clear the canvas?")) {
+      ctx.clearRect(0,0,board.width,board.height); 
+      saveHistory(); 
+    }
+  });
+  
+  saveBtn.addEventListener('click', ()=>{ 
+    const link = document.createElement('a'); 
+    link.download = 'my-drawing.png'; 
+    link.href = board.toDataURL('image/png'); 
+    link.click(); 
+  });
 
   // ---------------- Remote Drawing -----------------
   const remoteDrawings = {};
 
-  socket.on("paintPos", (data) => {
-    const { id, x, y, color, brush, mode } = data;
-    if (!remoteDrawings[id]) remoteDrawings[id] = {};
-    const r = remoteDrawings[id];
-    r.color = color; r.brush = parseInt(brush,10); r.mode = mode; r.active = true;
-    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    ctx.lineWidth = r.brush; ctx.strokeStyle = r.color;
-    ctx.globalCompositeOperation = (r.mode === 'erase') ? 'destination-out' : 'source-over';
-    ctx.beginPath(); ctx.moveTo(x,y);
+  function setupSocketEvents() {
+    socket.on("connect", () => {
+      console.log("Connected to server");
+      updateConnectionStatus(true);
+    });
+
+    socket.on("disconnect", () => {
+      console.log("Disconnected from server");
+      updateConnectionStatus(false);
+    });
+
+    socket.on("connect_error", (err) => {
+      console.error("Connection error:", err);
+      updateConnectionStatus(false);
+      setTimeout(() => {
+        if (!isConnected) {
+          alert("Could not connect to server. Working in offline mode.");
+        }
+      }, 1000);
+    });
+
+    socket.on("start", (data) => {
+      console.log(data);
+      const { id, x, y, color, brush, mode } = data;
+      if (!remoteDrawings[id]) remoteDrawings[id] = {};
+      const r = remoteDrawings[id];
+      r.color = color; r.brush = parseInt(brush,10); r.mode = mode; r.active = true;
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.lineWidth = r.brush; ctx.strokeStyle = r.color;
+      ctx.globalCompositeOperation = (r.mode === 'erase') ? 'destination-out' : 'source-over';
+      ctx.beginPath(); ctx.moveTo(x,y);
+    });
+
+    socket.on("move", (data) => {
+      console.log(data);
+      
+      const { id, x, y } = data;
+      const r = remoteDrawings[id];
+      if (!r || !r.active) return;
+      ctx.lineTo(x,y); ctx.stroke();
+    });
+
+    socket.on("end", (data) => {
+      const { id } = data;
+      const r = remoteDrawings[id];
+      if(r && r.active){ ctx.closePath(); r.active=false; }
+    });
+
+    socket.on("addSticker", (data) => {
+      const { id, x, y, sticker, size } = data;
+      ctx.save();
+      ctx.font = `bold ${size}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillText(sticker, x, y);
+      ctx.restore();
+    });
+  }
+
+  // Server connection modal handlers
+  connectBtn.addEventListener('click', () => {
+    const url = serverUrlInput.value;
+    try {
+      socket = io(url);
+      setupSocketEvents();
+      updateConnectionStatus(true);
+    } catch (err) {
+      alert("Error connecting to server: " + err.message);
+      updateConnectionStatus(false);
+    }
   });
 
-  socket.on("moveStroke", (data) => {
-    const { id, x, y } = data;
-    const r = remoteDrawings[id];
-    if (!r || !r.active) return;
-    ctx.lineTo(x,y); ctx.stroke();
+  workOfflineBtn.addEventListener('click', () => {
+    serverModal.style.display = 'none';
+    updateConnectionStatus(false);
   });
 
-  socket.on("endStroke", (data) => {
-    const { id } = data;
-    const r = remoteDrawings[id];
-    if(r && r.active){ ctx.closePath(); r.active=false; }
-  });
-
-  // Init
+  // Check if we have a server URL in localStorage
   function init(){
     setupSwatches();
     brush.dispatchEvent(new Event('input'));
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
     saveHistory();
+    
+    // Show server connection modal on startup
+    serverModal.style.display = 'flex';
+    
+    // Try to auto-connect if we have a saved URL
+    const savedUrl = localStorage.getItem('drawingServerUrl');
+    if (savedUrl) {
+      serverUrlInput.value = savedUrl;
+      try {
+        socket = io(savedUrl);
+        setupSocketEvents();
+      } catch (err) {
+        console.error("Auto-connect failed:", err);
+      }
+    }
   }
+  
   init();
   </script>
 </body>
 </html>
-
